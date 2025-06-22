@@ -1,0 +1,83 @@
+stages:
+  - validate
+  - build
+  - test
+  - security
+  - package
+  - deploy-staging
+  - performance-tests
+  - deploy-production
+
+variables:
+  NODE_VERSION: "18"
+  NPM_CONFIG_CACHE: "$CI_PROJECT_DIR/.npm"
+
+validate:
+  stage: validate
+  image: node:$NODE_VERSION
+  script:
+    - npm ci
+    - npm run lint
+    - npm run type-check
+  cache:
+    paths:
+      - .npm/
+      - node_modules/
+
+build:
+  stage: build
+  image: node:$NODE_VERSION
+  script:
+    - npm ci
+    - npm run build
+  artifacts:
+    paths:
+      - dist/
+    expire_in: 1 hour
+  cache:
+    paths:
+      - .npm/
+      - node_modules/
+
+unit-tests:
+  stage: test
+  image: node:$NODE_VERSION
+  script:
+    - npm run test:unit -- --coverage
+  coverage: '/All files[^|]*\|[^|]*\s+([\d\.]+)/'
+  artifacts:
+    reports:
+      junit: junit.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage/cobertura-coverage.xml
+
+integration-tests:
+  stage: test
+  image: node:$NODE_VERSION
+  services:
+    - postgres:13
+    - redis:6
+  script:
+    - npm run test:integration
+  artifacts:
+    reports:
+      junit: integration-junit.xml
+
+security-scan:
+  stage: security
+  image: node:$NODE_VERSION
+  script:
+    - npm audit --audit-level moderate
+    - npx snyk test --severity-threshold=medium
+
+performance-tests:
+  stage: performance-tests
+  image: loadimpact/k6:latest
+  script:
+    - k6 run --out influxdb=http://influxdb:8086/k6 performance-tests/load-test.js
+  artifacts:
+    reports:
+      performance: performance-report.json
+  only:
+    - main
