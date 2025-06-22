@@ -1,0 +1,129 @@
+stages:
+  - validate
+  - build
+  - test
+  - security
+  - package
+  - deploy-staging
+  - integration-tests
+  - deploy-production
+
+variables:
+  MAVEN_OPTS: "-Dmaven.repo.local=$CI_PROJECT_DIR/.m2/repository"
+  DOCKER_REGISTRY: "registry.company.com"
+  KUBERNETES_NAMESPACE: "payments-pix"
+
+validate:
+  stage: validate
+  image: maven:3.8-openjdk-17
+  script:
+    - mvn validate
+    - mvn dependency:analyze
+  cache:
+    paths:
+      - .m2/repository/
+
+build:
+  stage: build
+  image: maven:3.8-openjdk-17
+  script:
+    - mvn clean compile
+    - mvn package -DskipTests
+  artifacts:
+    paths:
+      - target/*.jar
+    expire_in: 1 hour
+  cache:
+    paths:
+      - .m2/repository/
+
+unit-tests:
+  stage: test
+  image: maven:3.8-openjdk-17
+  script:
+    - mvn test
+    - mvn jacoco:report
+  coverage: '/Total.*?([0-9]{1,3})%/'
+  artifacts:
+    reports:
+      junit: target/surefire-reports/TEST-*.xml
+      coverage_report:
+        coverage_format: jacoco
+        path: target/site/jacoco/jacoco.xml
+
+integration-tests:
+  stage: test
+  image: maven:3.8-openjdk-17
+  services:
+    - postgres:13
+    - redis:6
+  variables:
+    POSTGRES_DB: pix_test
+    POSTGRES_USER: test
+    POSTGRES_PASSWORD: test
+  script:
+    - mvn verify -Dspring.profiles.active=test
+  artifacts:
+    reports:
+      junit: target/failsafe-reports/TEST-*.xml
+
+security-scan:
+  stage: security
+  image: owasp/dependency-check:latest
+  script:
+    - dependency-check.sh --project "PIX-Service" --scan target/ --format ALL
+  artifacts:
+    reports:
+      dependency_scanning: dependency-check-report.json
+
+sonarqube-check:
+  stage: security
+  image: maven:3.8-openjdk-17
+  script:
+    - mvn sonar:sonar -Dsonar.projectKey=pix-service
+  only:
+    - main
+    - develop
+
+docker-build:
+  stage: package
+  image: docker:latest
+  services:
+    - docker:dind
+  script:
+    - docker build -t $DOCKER_REGISTRY/pix-service:$CI_COMMIT_SHA .
+    - docker push $DOCKER_REGISTRY/pix-service:$CI_COMMIT_SHA
+  only:
+    - main
+    - develop
+
+deploy-staging:
+  stage: deploy-staging
+  image: bitnami/kubectl:latest
+  script:
+    - kubectl config use-context staging
+    - helm upgrade --install pix-service ./helm-chart 
+      --set image.tag=$CI_COMMIT_SHA 
+      --set environment=staging
+      --namespace $KUBERNETES_NAMESPACE-staging
+  environment:
+    name: staging
+    url: https://pix-staging.company.com
+  only:
+    - develop
+
+deploy-production:
+  stage: deploy-production
+  image: bitnami/kubectl:latest
+  script:
+    - kubectl config use-context production
+    - helm upgrade --install pix-service ./helm-chart 
+      --set image.tag=$CI_COMMIT_SHA 
+      --set environment=production
+      --namespace $KUBERNETES_NAMESPACE
+  environment:
+    name: production
+    url: https://pix.company.com
+  when: manual
+  only:
+    - main
